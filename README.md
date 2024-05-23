@@ -3,7 +3,7 @@
 # scPrivacy
 
 This repository contains code underlying the results presented in the preprint/paper: <br/><br/>
-_Private information leakage from single-cell count matrices_ <br/>
+**Private information leakage from single-cell count matrices** <br/>
 by Conor R. Walker, Xiaoting Li, Manav Chakravarthy, William Lounsbery-Scaife, Yoolim A. Choi, Rithambara Singh, and Gamze Gürsoy <br/>
 DOI: TBD
 
