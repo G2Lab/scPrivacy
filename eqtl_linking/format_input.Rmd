@@ -1,0 +1,522 @@
+---
+title: "Format input data for eQTL linking"
+date: "2024-05-23"
+---
+
+## Load libraries and data
+
+```{r}
+library(GenomicRanges)
+library(Seurat)
+library(vcfR)
+
+library(reticulate)
+reticulate::use_condaenv("scvi-env", required = TRUE)
+sc <- import("scanpy")
+```
+
+```{r}
+gene.info <- rtracklayer::import("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/data/Homo_sapiens.GRCh37.82.gtf")
+gene.info <- gene.info[gene.info$type == "gene"]
+
+ct_names <- read.table("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/expression/cov_match_names.txt", header = T, stringsAsFactors = F)
+ct_names$cell_id <- tolower(gsub("_", "", ct_names$cell_type))
+```
+
+## Process eQTLs
+
+### OneK1K: cell-type specific eQTLs
+
+```{r}
+eqtls_df <- read.delim("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/data/eQTLs/esnp_table.tsv", header = T)
+table(eqtls_df$CELL_ID)
+table(eqtls_df$GENE %in% gene.info$gene_name)
+
+eqtls_new_df <- data.frame(snp_id = eqtls_df$SNPID, #SNPID: "CHR:POS_ALT"
+                           unused = "-",
+                           gene_id = eqtls_df$GENE,
+                           gene_id2 = eqtls_df$GENE,
+                           snp_chr = eqtls_df$CHR,
+                           gene_chr = as.integer(as.character(seqnames(gene.info)[match(eqtls_df$GENE, gene.info$gene_name)])),
+                           snp_pos = eqtls_df$POS,
+                           gene_start = start(gene.info)[match(eqtls_df$GENE, gene.info$gene_name)],
+                           gene_snp_dist = 0,
+                           correlation = eqtls_df$SPEARMANS_RHO,
+                           cell_type = ct_names$cell_type[match(eqtls_df$CELL_ID, ct_names$cell_id)])
+
+
+write.table(eqtls_new_df[,1:10], "data/eQTL/OneK1K/OneK1K_eqtl_all.txt", col.names = F, row.names = F, quote = F)
+
+for(ct in ct_names$cell_type) {
+  eqtls_sub <- subset(eqtls_new_df, cell_type == ct)
+  write.table(eqtls_sub[,1:10], paste0("data/eQTL/OneK1K/OneK1K_eqtl_", ct, ".txt"), col.names = F, row.names = F, quote = F)
+}
+
+rm(eqtls_df, eqtls_new_df, eqtls_sub, ct)
+```
+
+### GTEx: Whole blood bulk eQTLs
+
+```{r}
+eqtls_df <- read.delim("/gpfs/commons/datasets/controlled/GTEx/portal/data/v8/GTEx_Analysis_v8_eQTL/Whole_Blood.v8.egenes.txt.gz", header = T)
+eqtls_df <- subset(eqtls_df, qval <= 0.05)
+eqtls_df$gene_id <- sapply(strsplit(eqtls_df$gene_id, "\\."), "[[", 1) 
+eqtls_df <- subset(eqtls_df, gene_id %in% gene.info$gene_id)
+
+gene_names_match <- gene.info$gene_name[match(eqtls_df$gene_id, gene.info$gene_id)]
+eqtls_df$gene_name <- gene_names_match
+
+eqtls_df$gene_chr <- gsub("chr", "", eqtls_df$gene_chr)
+eqtls_df$chr <- gsub("chr", "", eqtls_df$chr)
+
+# convert genes:
+eqtls_df$gene_start <- start(gene.info)[match(eqtls_df$gene_id, gene.info$gene_id)] 
+
+# convert SNPs:
+eqtls_df$variant_pos0 <- eqtls_df$variant_pos -1
+write.table(eqtls_df[,c("chr", "variant_pos0", "variant_pos", "variant_id")], "data/eQTL/GTEx/GTEx_WB_eQTLs_hg38.bed",row.names = F,col.names = F, sep="\t", quote = F)
+```
+
+```{bash}
+cd data/eQTL/GTEx
+
+chain_dir=/gpfs/commons/groups/gursoy_lab/xli/softwares
+CrossMap.py bed $chain_dir/hg38ToHg19.over.chain.gz  GTEx_WB_eQTLs_hg38.bed GTEx_WB_eQTLs_crossmap_hg19.bed
+```
+
+```{r}
+convert_snps <- read.delim("data/eQTL/GTEx/GTEx_WB_eQTLs_crossmap_hg19.bed", header = F, col.names = c("chr", "pos0", "pos", "variant_id"))
+convert_snps <- convert_snps[!duplicated(convert_snps),] 
+table(eqtls_df$variant_id %in% convert_snps$variant_id) # 51 unmapped
+eqtls_df <- subset(eqtls_df, variant_id %in% convert_snps$variant_id) 
+eqtls_df$variant_pos <- convert_snps$pos[match(eqtls_df$variant_id, convert_snps$variant_id)]
+
+
+#SNPID: "CHR:POS_ALT"
+eqtls_new_df <- data.frame(snp_id = paste0(eqtls_df$chr, ":", eqtls_df$variant_pos, "_", eqtls_df$alt), 
+                           unused = "-",
+                           gene_id = eqtls_df$gene_name,
+                           gene_id2 = eqtls_df$gene_name,
+                           snp_chr = eqtls_df$chr,
+                           gene_chr = eqtls_df$gene_chr,
+                           snp_pos = eqtls_df$variant_pos,
+                           gene_start = eqtls_df$gene_start,
+                           gene_snp_dist = 0, #not used
+                           slope = eqtls_df$slope)
+
+write.table(eqtls_new_df, "data/eQTL/GTEx/GTEx_Whole_Blood_converted_eqtl.txt", col.names = F, row.names = F, quote = F)
+rm(convert_snps)
+```
+
+## Process expression data
+
+```{r}
+# Function
+getNewExprs <- function(expr_input){
+  expr_df <- expr_input[rownames(expr_input) %in% gene.info$gene_name[as.vector(seqnames(gene.info)) %in% c(1:22)], ]
+  data.frame(chr = as.integer(as.vector(seqnames(gene.info)[match(rownames(expr_df), gene.info$gene_name)])),
+             start = start(gene.info)[match(rownames(expr_df), gene.info$gene_name)],
+             end = end(gene.info)[match(rownames(expr_df), gene.info$gene_name)],
+             gene_id = rownames(expr_df),
+             expr_df)
+}
+```
+
+### Onek1k
+
+Each cell type:
+
+```{r}
+
+onek1k_trans_dir <- "/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/ml/data/onek1k_cell_type_pseudobulk/"
+
+trans_ls <- c("log_tmm/invnorm_log_pseudobulk_matrices/",
+              "log_tmm/invnorm_regression_residuals/",
+              "sum_agg/invnorm_log_pseudobulk_matrices/",
+              "sum_agg/invnorm_regression_residuals/")
+
+
+for(ct in ct_names$cell_type) {
+  
+  # original expression
+  onek1k_orig <- readRDS(paste0("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/expression/ct_data/", ct, ".mean_exprs.rds"))
+  onek1k_orig <- apply(t(onek1k_orig), 1:2, function(x)log(x + 1))
+  onek1k_orig_new <- getNewExprs(onek1k_orig)
+  write.table(onek1k_orig_new, paste0("data/expression/OneK1K/original/", ct, ".dat"), col.names = F, row.names = F, quote = F)
+  write.table(colnames(onek1k_orig), paste0("data/expression/OneK1K/original/", ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+  
+  # transformed expression
+  for (sub_dir in trans_ls){
+    onek1k_trans <- read.delim(paste0(onek1k_trans_dir, sub_dir, ct, ".tsv"), header = T, stringsAsFactors = F, row.names = 1)
+    colnames(onek1k_trans) <- gsub("^X", "", colnames(onek1k_trans))
+    onek1k_trans <- onek1k_trans[,colSums(is.na(onek1k_trans)) == 0]
+    onek1k_trans <- onek1k_trans[apply(onek1k_trans, 1, sum) != 0, ]
+    onek1k_trans_new <- getNewExprs(onek1k_trans)
+    write.table(onek1k_trans_new, paste0("data/expression/OneK1K/", sub_dir, ct, ".dat"), col.names = F, row.names = F, quote = F)
+    write.table(colnames(onek1k_trans), paste0("data/expression/OneK1K/", sub_dir, ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+  }
+  
+  print(ct)
+}
+```
+
+Subsampling 
+
+```{r}
+sub_ls <- c("n_200", "n_400", "n_600", "n_800", "n_1000")
+
+onek1k_trans_dir <- "/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/ml/data/subsample_onek1k_cell_type_pseudobulk/"
+
+for(sub_num in sub_ls) {
+  for (trans_type in trans_ls){
+    for(ct in ct_names$cell_type){
+      onek1k_trans <- read.delim(paste0(onek1k_trans_dir, sub_num, "/", trans_type, ct, ".tsv"), header = T, stringsAsFactors = F, row.names = 1)
+      colnames(onek1k_trans) <- gsub("^X", "", colnames(onek1k_trans))
+      onek1k_trans <- onek1k_trans[,colSums(is.na(onek1k_trans)) == 0]
+      onek1k_trans <- onek1k_trans[apply(onek1k_trans, 1, sum) != 0, ]
+      onek1k_trans_new <- getNewExprs(onek1k_trans)
+      write.table(onek1k_trans_new, paste0("data/expression/OneK1K_subsample/", sub_num, "/", trans_type, ct, ".dat"), col.names = F, row.names = F, quote = F)
+      write.table(colnames(onek1k_trans), paste0("data/expression/OneK1K_subsample/", sub_num, "/", trans_type, ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+      print(ct)
+    }
+    print(trans_type)
+  }
+  print(sub_num)
+}
+```
+
+Pseudo bulk of all cells:
+
+```{python}
+import pandas as pd
+import scanpy as sc
+import numpy as np
+
+
+onek1k_adata = sc.read_h5ad('/gpfs/commons/groups/gursoy_lab/xli/OneK1K/scanpy_process/OneK1K_scanpy_all.h5ad')
+
+expr_df = onek1k_adata.X
+individuals = onek1k_adata.obs['individual']
+uniq_indiv = np.unique(individuals)
+genes = onek1k_adata.var_names
+
+
+mean_expr_indiv = pd.DataFrame(index=genes, columns=uniq_indiv)
+
+for indiv in uniq_indiv:
+   
+    individual_cells = individuals == indiv
+    individual_expression_values = expr_df[individual_cells]
+    mean_expression = np.mean(individual_expression_values, axis=0)
+    mean_expr_indiv[indiv] = mean_expression
+
+
+mean_expr_indiv.to_csv('/gpfs/commons/groups/gursoy_lab/xli/OneK1K/scanpy_process/ct_data/allCells_mean_expr.csv')
+```
+
+```{r}
+onek1k_repr_all_mean <- read.csv("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/scanpy_process/ct_data/allCells_mean_expr.csv", 
+                                 stringsAsFactors = F, row.names = 1)
+colnames(onek1k_repr_all_mean) <- gsub("^X", "", colnames(onek1k_repr_all_mean))
+
+onek1k_repr_all <- getNewExprs(onek1k_repr_all_mean) 
+write.table(onek1k_repr_all, "data/expression/OneK1K/reprocessed/allCells.dat", col.names = F, row.names = F, quote = F)
+write.table(colnames(onek1k_repr_all_mean), "data/expression/OneK1K/reprocessed/allCells_samples.list", row.names = F, col.names = F, quote = F)
+```
+
+### Lupus
+
+Each cell type:
+
+```{r}
+lupus_trans_dir <- "/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/ml/data/lupus_cell_type_pseudobulk/"
+
+
+for(ct in ct_names$cell_type) {
+
+   # scanpy reprocessed
+  lupus_repr <- readRDS(paste0("/gpfs/commons/groups/gursoy_lab/xli/Lupus/new_data/ct_data/Lupus.", ct, ".mean_exprs.rds"))
+  #table(rownames(lupus_repr) %in% gene.info$gene_id)
+  gene_names_match <- gene.info$gene_name[match(rownames(lupus_repr), gene.info$gene_id)]
+  lupus_repr <- lupus_repr[!duplicated(gene_names_match),]
+  rownames(lupus_repr) <- gene_names_match[!duplicated(gene_names_match)]
+  lupus_repr_new <- getNewExprs(lupus_repr)
+  write.table(lupus_repr_new, paste0("data/expression/Lupus/reprocessed/", ct, ".dat"), col.names = F, row.names = F, quote = F)
+  write.table(colnames(lupus_repr), paste0("data/expression/Lupus/reprocessed/", ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+  
+  # transformed expression
+  for (sub_dir in trans_ls){
+    lupus_trans <- read.delim(paste0(lupus_trans_dir, sub_dir, ct, ".tsv"), header = T, stringsAsFactors = F, row.names = 1)
+    colnames(lupus_trans) <- gsub("^X", "", colnames(lupus_trans))
+    colnames(lupus_trans) <- gsub("\\.", "-", colnames(lupus_trans))
+    lupus_trans <- lupus_trans[,colSums(is.na(lupus_trans)) == 0]
+    lupus_trans <- lupus_trans[apply(lupus_trans, 1, sum) != 0, ]
+    lupus_trans_new <- getNewExprs(lupus_trans)
+    write.table(lupus_trans_new, paste0("data/expression/Lupus/", sub_dir, ct, ".dat"), col.names = F, row.names = F, quote = F)
+    write.table(colnames(lupus_trans), paste0("data/expression/Lupus/", sub_dir, ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+  }
+  
+  print(ct)
+}
+
+rm(lupus_orig, lupus_orig_new, lupus_repr, lupus_repr_new, ct, gene_names_match)
+gc()
+```
+
+Subsampling 
+
+```{r}
+lupus_trans_dir <- "/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/ml/data/subsample_lupus_cell_type_pseudobulk/"
+
+for(sub_num in sub_ls) {
+  for (trans_type in trans_ls){
+    for(ct in ct_names$cell_type){
+      lupus_trans <- read.delim(paste0(lupus_trans_dir, sub_num, "/", trans_type, ct, ".tsv"), header = T, stringsAsFactors = F, row.names = 1)
+      colnames(lupus_trans) <- gsub("^X", "", colnames(lupus_trans))
+      colnames(lupus_trans) <- gsub("\\.", "-", colnames(lupus_trans))
+      lupus_trans <- lupus_trans[,colSums(is.na(lupus_trans)) == 0]
+      #lupus_trans <- lupus_trans[apply(lupus_trans, 1, sum) != 0, ]
+      lupus_trans <- lupus_trans[!apply(lupus_trans, 1, function(x) all(x==0)), ]
+      lupus_trans_new <- getNewExprs(lupus_trans)
+      write.table(lupus_trans_new, paste0("data/expression/Lupus_subsample/", sub_num, "/", trans_type, ct, ".dat"), col.names = F, row.names = F, quote = F)
+      write.table(colnames(lupus_trans), paste0("data/expression/Lupus_subsample/", sub_num, "/", trans_type, ct, "_samples.list"), row.names = F, col.names = F, quote = F)
+      print(ct)
+    }
+    print(trans_type)
+  }
+  print(sub_num)
+}
+```
+
+Pseudo bulk of all cells:
+
+```{python}
+import pandas as pd
+import scanpy as sc
+import numpy as np
+
+
+lupus_adata = sc.read_h5ad("/gpfs/commons/groups/gursoy_lab/xli/Lupus/new_data/Lupus_new_scanpy_processed.h5ad")
+
+expr_df = lupus_adata.X
+individuals = lupus_adata.obs['ind_cov']
+uniq_indiv = np.unique(individuals)
+genes = lupus_adata.var_names
+
+mean_expr_indiv = pd.DataFrame(index=genes, columns=uniq_indiv)
+
+for indiv in uniq_indiv:
+   
+    individual_cells = individuals == indiv
+    individual_expression_values = expr_df[individual_cells]
+    mean_expression = np.mean(individual_expression_values, axis=0)
+    mean_expr_indiv[indiv] = mean_expression
+
+
+mean_expr_indiv.to_csv('/gpfs/commons/groups/gursoy_lab/xli/Lupus/new_data/ct_data/allCells_mean_expr.csv')
+```
+
+```{r}
+lupus_repr_all_mean <- read.csv("/gpfs/commons/groups/gursoy_lab/xli/Lupus/new_data/ct_data/allCells_mean_expr.csv",
+                                stringsAsFactors = F, row.names = 1)
+colnames(lupus_repr_all_mean) <- gsub("^X", "", colnames(lupus_repr_all_mean)) 
+colnames(lupus_repr_all_mean) <- gsub("\\.", "-", colnames(lupus_repr_all_mean)) 
+
+gene_names_match <- gene.info$gene_name[match(rownames(lupus_repr_all_mean), gene.info$gene_id)]
+lupus_repr_all_mean <- lupus_repr_all_mean[!duplicated(gene_names_match),]
+rownames(lupus_repr_all_mean) <- gene_names_match[!duplicated(gene_names_match)]
+                             
+lupus_repr_all <- getNewExprs(lupus_repr_all_mean) 
+write.table(lupus_repr_all, "data/expression/Lupus/reprocessed/allCells.dat", col.names = F, row.names = F, quote = F)
+write.table(colnames(lupus_repr_all_mean), "data/expression/Lupus/reprocessed/allCells_samples.list", row.names = F, col.names = F, quote = F)
+```
+
+## Process genotype files
+
+### Subset for GTEx + OneK1K eQTLs
+
+```{r}
+gtex_eqtls <- read.table("data/eQTL/GTEx/GTEx_Whole_Blood_converted_eqtl.txt")
+onek1k_eqtls <- read.table("data/eQTL/OneK1K/OneK1K_eqtl_all.txt")
+
+#table(onek1k_eqtls$V1 %in% gtex_eqtls$V1)
+eqlts_all <- rbind(gtex_eqtls[,c(1,5,7)],
+                   onek1k_eqtls[,c(1,5,7)])
+eqlts_all <- eqlts_all[!duplicated(eqlts_all),]
+
+snp_pos <- eqlts_all[,c(2,3)]
+snp_pos <- unique(snp_pos)
+write.table(snp_pos, "data/genotype/all_eqtl_pos.txt", sep = "\t",  row.names = F, col.names = F, quote = F)
+
+
+convert_gt <- function(gt){
+  if (gt == "0|0"){
+    return(0)
+  } else if (gt =="1|1") {
+    return(2)
+  } else {
+    return(1)
+  }
+}
+```
+
+```{bash}
+module load vcftools
+module load bcftools
+
+cd /gpfs/commons/groups/gursoy_lab/xli/linking/
+snp_pos=data/genotype/all_eqtl_pos.txt
+
+echo "\n##### OneK1K #####"
+
+onek1k_vcf=/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/ml/data/onek1k/phased_vcfs
+
+for i in $(seq 1 22); do
+vcftools --gzvcf ${onek1k_vcf}/chr${i}.filtered.renamed.vcf.gz --positions ${snp_pos} --recode --out data/genotype/OneK1K/chr/filtered_chr${i}
+done
+
+ls data/genotype/OneK1K/chr/filtered_chr*.vcf > data/genotype/OneK1K/chr/merge.txt
+bcftools concat -f data/genotype/OneK1K/chr/merge.txt -o data/genotype/OneK1K/OneK1K_genotype_filtered_merged.vcf
+
+
+echo "\n##### Lupus #####"
+
+lupus_vcf=/gpfs/commons/groups/gursoy_lab/cwalker/projects/sc_privacy/data/lupus/vcf/all_samples_filtered_dbgap.vcf.gz
+vcftools --gzvcf ${lupus_vcf} --positions ${snp_pos}  --recode --out data/genotype/Lupus/Lupus_genotype_filtered
+```
+
+### OneK1K
+
+```{r}
+onek1k_geno <- read.vcfR("data/genotype/OneK1K/OneK1K_genotype_filtered_merged.vcf")
+onek1k_fix <- onek1k_geno@fix
+onek1k_gt_df <- apply(onek1k_geno@gt[,-1], 1:2, function(x) strsplit(x, ":")[[1]][1])
+table(onek1k_gt_df)
+onek1k_gt_df <- apply(onek1k_gt_df, 1:2, convert_gt)
+
+
+onek1k_gt_new <- data.frame(chr = as.integer(onek1k_fix[,1]),
+                            pos0 = as.integer(onek1k_fix[,2]) -1,
+                            pos1 = as.integer(onek1k_fix[,2]),
+                            snp_id = paste0(onek1k_fix[,1], ":", onek1k_fix[,2], "_", onek1k_fix[,5]),
+                            onek1k_gt_df)
+
+write.table(onek1k_gt_new, "data/genotype/OneK1K/OneK1K_genotype.txt", row.names = F, col.names = F, quote = F)
+write.table(colnames(onek1k_gt_df), "data/genotype/OneK1K/OneK1K_genotype_samples.list", row.names = F, col.names = F, quote = F)
+
+```
+
+### Lupus
+
+High-quality samples (with no missing genotype)
+
+```{r}
+lupus_geno <- read.vcfR("data/genotype/Lupus/Lupus_genotype_filtered.recode.vcf")
+lupus_fix <- lupus_geno@fix
+lupus_gt_df <- apply(lupus_geno@gt[,-1], 1:2, function(x) strsplit(x, ":")[[1]][1])
+table(lupus_gt_df)
+lupus_gt_df <- apply(lupus_gt_df, 1:2, function(x) gsub("/", "|", x))
+table(lupus_gt_df)
+#.|.    0|0    0|1    1|0    1|1 
+table(is.na(lupus_gt_df))
+
+snp_na <- apply(lupus_gt_df, 1, function(x)sum(is.na(x)))
+table(snp_na)
+lupus_gt_df <- lupus_gt_df[snp_na == 0,]
+lupus_fix <- lupus_fix[snp_na == 0,]   
+
+snp_dot <- apply(lupus_gt_df, 1, function(x)sum(x == ".|."))  
+table(snp_dot)
+ind_dot <- apply(lupus_gt_df, 2, function(x)sum(x == ".|."))
+table(ind_dot)
+lupus_gt_df <- lupus_gt_df[, ind_dot == 0]   
+
+
+lupus_gt_df <- apply(lupus_gt_df, 1:2, convert_gt)
+
+
+lupus_gt_new <- data.frame(chr = lupus_fix[,1],
+                           pos0 = as.integer(lupus_fix[,2]) -1,
+                           pos1 = as.integer(lupus_fix[,2]),
+                           snp_id = paste0(lupus_fix[,1], ":", lupus_fix[,2], "_", lupus_fix[,5]),
+                           lupus_gt_df)
+
+
+write.table(lupus_gt_new, "data/genotype/Lupus/Lupus_genotype.txt", row.names = F, col.names = F, quote = F)
+write.table(colnames(lupus_gt_df), "data/genotype/Lupus/Lupus_genotype_samples.list", row.names = F, col.names = F, quote = F)
+```
+
+All samples
+
+```{r}
+lupus_geno <- read.vcfR("data/genotype/Lupus/Lupus_genotype_filtered.recode.vcf")
+lupus_fix <- lupus_geno@fix
+lupus_gt_df <- apply(lupus_geno@gt[,-1], 1:2, function(x) strsplit(x, ":")[[1]][1])
+lupus_gt_df <- apply(lupus_gt_df, 1:2, function(x) gsub("/", "|", x))
+
+snp_na <- apply(lupus_gt_df, 1, function(x)sum(is.na(x)))
+lupus_gt_df <- lupus_gt_df[snp_na == 0,]
+lupus_fix <- lupus_fix[snp_na == 0,]   
+table(lupus_gt_df)
+
+
+convert_gt_na <- function(gt){
+  if (gt == "0|0"){
+    return(0)
+  } else if (gt =="1|1") {
+    return(2)
+  } else if (gt == ".|.") {
+    return(NA)
+  } else {
+    return(1)
+  }
+}
+
+lupus_gt_na <- apply(lupus_gt_df, 1:2, convert_gt_na)
+
+lupus_gt_na_new <- data.frame(chr = lupus_fix[,1],
+                              pos0 = as.integer(lupus_fix[,2]) -1,
+                              pos1 = as.integer(lupus_fix[,2]),
+                              snp_id = paste0(lupus_fix[,1], ":", lupus_fix[,2], "_", lupus_fix[,5]),
+                              lupus_gt_na)
+
+write.table(lupus_gt_na_new, "data/genotype/Lupus/Lupus_genotype_all.txt", row.names = F, col.names = F, quote = F)
+write.table(colnames(lupus_gt_na), "data/genotype/Lupus/Lupus_genotype_all_samples.list", row.names = F, col.names = F, quote = F)
+
+```
+
+## Process auxiliary files
+
+### OneK1K
+
+```{r}
+ct <- "CD4_NC"
+cov_df <- read.table(paste0("/gpfs/commons/groups/gursoy_lab/xli/OneK1K/data/OneK1K_covariates_PCs_PFs_14_cell_types/", ct, "_peer_factors.tsv"), 
+                     header = T, stringsAsFactors = F, row.names = 1)
+sex <- ifelse(cov_df$sex == 1, "male", "female")
+write.table(sex, "data/auxiliary/OneK1K_sex.txt", row.names = F, col.names = F, quote = F)
+write.table(rownames(cov_df), "data/auxiliary/OneK1K_info_samples.txt", row.names = F, col.names = F, quote = F)
+
+# no relatives
+write.table(rownames(cov_df), "data/auxiliary/OneK1K_family_id_relationship.txt", row.names = F, col.names = F, quote = F)
+# all EUR
+write.table(rep("EUR", nrow(cov_df)), "data/auxiliary/OneK1K_pop.txt", row.names = F, col.names = F, quote = F)
+```
+
+### Lupus
+
+```{r}
+lupus_adata <- sc$read_h5ad('/gpfs/commons/groups/gursoy_lab/xli/Lupus/integration/data/Lupus_integrated.h5ad')
+indiv_info <- lupus_adata$obs[,c("ind_cov", "Sex", "pop_cov")]
+indiv_info <- unique(indiv_info)
+rownames(indiv_info) <- NULL                     
+                     
+write.table(indiv_info$Sex, "data/auxiliary/Lupus_sex.txt", row.names = F, col.names = F, quote = F)
+
+write.table(indiv_info$pop_cov, "data/auxiliary/Lupus_pop.txt", row.names = F, col.names = F, quote = F)
+                     
+write.table(indiv_info$ind_cov, "data/auxiliary/Lupus_info_samples.txt", row.names = F, col.names = F, quote = F)
+
+#no relatives
+write.table(indiv_info$ind_cov, "data/auxiliary/Lupus_family_id_relationship.txt", row.names = F, col.names = F, quote = F)
+```
