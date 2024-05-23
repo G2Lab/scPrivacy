@@ -1,7 +1,7 @@
 ## Directory contents
 
 
-**onek1k_crossval_variant_selection_AAF_diffs.py** </br>
+**select_and_cross_validate_AAF_diff_variants.py** </br>
 Used to select variants that are amenable to prediction/linking by cross-validating differences in allele frequency from a training cohort. This script takes as arguments: </br>
 `--train-cohort`: a substring in a file path indicating the training cohort to use for variant selection (e.g. "300" was used to indicate the 300-individual training cohort) </br>
 `--aaf-threshold`: a threshold on the alternate allele frequency used in variant cross-validation </br>
