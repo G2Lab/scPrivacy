@@ -12,7 +12,22 @@ Used to select variants that are amenable to prediction/linking by cross-validat
 `--experiment-dir`: base directory to save output relative to</br>
 `--pseudobulk-matrix-dir`: directory containing the individual x gene un-normalized pseudobulk matrices</br>
 `--norm-pseudobulk-matrix-dir`: directory containing the individual x gene normalized pseudobulk matrices</br>
-`--crossval-dir`: directory in which cross-validate variant information is saved</br>
+`--crossval-dir`: directory in which cross-validated variant information is saved</br>
 `--null-crossval-dir`: directory in which null cross-validated variants are stored (determined through randomly sampling both sides of the pseudobulk distribution, used to assess significance of variants)</br>
+
+
+**predict_AAF_diff_variants.py** </br>
+Used to predict each cross-validated variant per cell type based on thresholding the normally-distributed pseudobulk data per gene. This script takes as arguments: </br>
+`--cell-type`: a cell type annotation to indicate which file to process (e.g. CD4_NC, B_IN, etc.)
+`--aaf-threshold`: a threshold on the alternate allele frequency that was used in variant cross-validation(defines the directory to parse variant info from) </br>
+`--expression-threshol`: the absolute threshold on determining if an individual falls in the left or right tails of the pseudobulk expression distribution for genotype prediction </br>
+`--experiment-dir`: base directory to save output relative to</br>
+`--pseudobulk-matrix-dir`: directory containing the individual x gene un-normalized pseudobulk matrices</br>
+`--norm-pseudobulk-matrix-dir`: directory containing the individual x gene normalized pseudobulk matrices</br>
+`--crossval-dir`: directory in which cross-validated variant information is saved</br>
+`--true-genotype-dir`: directory to store true genotypes in
+`--pred-genotype-dir`: directory to store predicted genotypes in
+`--haplotype-df-dir`: directory containing haplotype parquet files for variants within 1mb of each gene (for faster access across our experiments)
+`--sample-file`: file containing one sample per line to process for genotype prediction
 
 
